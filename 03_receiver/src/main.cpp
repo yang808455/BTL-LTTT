@@ -1,12 +1,12 @@
 #include <Arduino.h>
-#include "include/rx_config.h"
-#include "include/frame_parser.h"
-#include "include/chn_decoder_hamming.h"
-#include "include/chn_decoder_cyclic.h"
-#include "include/src_decoder_huffman.h"
-#include "include/src_decoder_arithmetic.h"
-#include "include/src_decoder_lzw.h"
-#include "include/metrics_evaluator.h"
+#include "rx_config.h"
+#include "frame_parser.h"
+#include "chn_decoder_hamming.h"
+#include "chn_decoder_cyclic.h"
+#include "src_decoder_huffman.h"
+#include "src_decoder_arithmetic.h"
+#include "src_decoder_lzw.h"
+#include "metrics_evaluator.h"
 
 static HardwareSerial SerialFromChannel(0); /* UART0 nhận từ ESP32 Kênh trên GPIO 20 */
 

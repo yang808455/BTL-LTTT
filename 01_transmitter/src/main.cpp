@@ -1,6 +1,6 @@
 #include <Arduino.h>
-#include "include/tx_config.h"
-#include "include/frame_builder.h"
+#include "tx_config.h"
+#include "frame_builder.h"
 
 static HardwareSerial SerialChannel(1); /* UART1 kết nối sang Bo mạch Kênh */
 

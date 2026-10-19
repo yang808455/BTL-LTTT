@@ -1,7 +1,7 @@
 #include <Arduino.h>
-#include "include/channel_config.h"
-#include "include/noise_generator.h"
-#include "include/frame_forwarder.h"
+#include "channel_config.h"
+#include "noise_generator.h"
+#include "frame_forwarder.h"
 
 static HardwareSerial SerialFromTx(0); /* UART0 nhận từ Tx trên GPIO 20 */
 static HardwareSerial SerialToRx(1);   /* UART1 phát sang Rx trên GPIO 21 */
