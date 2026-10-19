@@ -67,8 +67,6 @@ void setup() {
     Serial.println("{\"type\":\"NODE_READY\",\"node\":\"CHANNEL_EMULATOR\",\"version\":\"1.0\"}");
 }
 
-static unsigned long g_last_heartbeat = 0;
-
 void loop() {
     /* Đọc lệnh điều khiển từ PC qua USB */
     if (Serial.available()) {
@@ -77,18 +75,6 @@ void loop() {
         if (line.length() > 0) {
             process_pc_command(line);
         }
-    }
-
-    /* Nhịp tim định kỳ 2 giây/lần */
-    if (millis() - g_last_heartbeat >= 2000) {
-        g_last_heartbeat = millis();
-        Serial.print("{\"type\":\"CHANNEL_STATUS\",\"ber\":");
-        Serial.print(g_settings.ber, 4);
-        Serial.print(",\"scope\":");
-        Serial.print((int)g_settings.scope);
-        Serial.print(",\"enabled\":");
-        Serial.print(g_settings.enabled ? "true" : "false");
-        Serial.println("}");
     }
 
     /* Đọc byte từ Node 1 (Tx) */
