@@ -1,0 +1,20 @@
+# .gitignore cho dự án Hệ thống Truyền tin số ESP32-C3
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.bak

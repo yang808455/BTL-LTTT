@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Node 3: Receiver Dashboard - Digital Communication System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0a0f1d;
+            --card-dark: #151d30;
+            --border-dark: #23314d;
+            --accent-green: #10b981;
+            --accent-cyan: #06b6d4;
+            --accent-purple: #a855f7;
+            --accent-red: #ef4444;
+        }
+        body { background-color: var(--bg-dark); color: #e2e8f0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .card { background-color: var(--card-dark); border: 1px solid var(--border-dark); border-radius: 12px; }
+        .btn-green { background-color: var(--accent-green); color: #0a0f1d; font-weight: 600; }
+        .btn-green:hover { background-color: #059669; color: #fff; }
+        .metric-val { font-size: 1.8rem; font-weight: 700; color: #34d399; }
+        .metric-sub { font-size: 0.85rem; color: #94a3b8; }
+        .text-box { background: #060912; font-family: 'Courier New', monospace; padding: 14px; border-radius: 8px; word-break: break-all; min-height: 80px; font-size: 1.05rem; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .dot-green { background-color: #10b981; box-shadow: 0 0 8px #10b981; }
+        .dot-red { background-color: #ef4444; box-shadow: 0 0 8px #ef4444; }
+    </style>
+</head>
+<body class="py-4">
+<div class="container-fluid px-4">
+    <!-- Header -->
+    <div class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
+        <div>
+            <h3 class="fw-bold mb-1"><i class="fa-solid fa-satellite-dish text-success me-2"></i>NODE 3: RECEIVER (MÁY THU)</h3>
+            <span class="text-secondary small">Giải mã kênh hệ thống (Sửa lỗi Hamming / Cyclic) & Giải nén nguồn (Huffman / Arithmetic / LZW)</span>
+        </div>
+        <div class="d-flex align-items-center gap-3">
+            <div id="connStatusPill" class="badge bg-danger py-2 px-3">
+                <span id="connDot" class="status-dot dot-red"></span><span id="connText">Chưa kết nối COM</span>
+            </div>
+            <div class="input-group input-group-sm" style="width: 250px;">
+                <select id="portSelect" class="form-select bg-dark text-white border-secondary"></select>
+                <button id="btnRefreshPorts" class="btn btn-outline-secondary" title="Quét lại cổng"><i class="fa-solid fa-rotate"></i></button>
+                <button id="btnToggleConnect" class="btn btn-green">Kết nối</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top Metrics Row -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-2 col-6">
+            <div class="card p-3 text-center">
+                <div class="metric-sub">TỔNG KHUNG NHẬN</div>
+                <div id="mTotalFrames" class="metric-val text-white">0</div>
+            </div>
+        </div>
+        <div class="col-md-2 col-6">
+            <div class="card p-3 text-center">
+                <div class="metric-sub">SỬA LỖI 1-BIT (SEC)</div>
+                <div id="mSingleErrors" class="metric-val text-info">0 <span class="fs-6 text-muted">bit</span></div>
+            </div>
+        </div>
+        <div class="col-md-2 col-6">
+            <div class="card p-3 text-center">
+                <div class="metric-sub">LỖI KÉP KHÔNG SỬA</div>
+                <div id="mDoubleErrors" class="metric-val text-danger">0 <span class="fs-6 text-muted">bit</span></div>
+            </div>
+        </div>
+        <div class="col-md-2 col-6">
+            <div class="card p-3 text-center">
+                <div class="metric-sub">TỶ LỆ SỬA THÀNH CÔNG</div>
+                <div id="mCorrectionRate" class="metric-val text-success">100%</div>
+            </div>
+        </div>
+        <div class="col-md-2 col-6">
+            <div class="card p-3 text-center">
+                <div class="metric-sub">TỶ LỆ LỖI KHUNG (FER)</div>
+                <div id="mFER" class="metric-val text-warning">0.00%</div>
+            </div>
+        </div>
+        <div class="col-md-2 col-6">
+            <div class="card p-3 text-center">
+                <div class="metric-sub">TỶ SỐ NÉN ĐO ĐƯỢC</div>
+                <div id="mCR" class="metric-val text-primary">0.00x</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="row g-4">
+        <!-- Cột trái: Văn bản đã khôi phục & Thông số gói tin -->
+        <div class="col-lg-6">
+            <div class="card p-3 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold mb-0 text-success"><i class="fa-solid fa-file-waveform me-2"></i>1. Dữ liệu Đã Khôi Phục (Decompressed Text)</h5>
+                    <div id="crcBadge" class="badge bg-secondary px-3 py-2">Đang chờ gói tin...</div>
+                </div>
+
+                <div class="mb-3">
+                    <label class="small text-secondary fw-semibold">Nội dung văn bản giải mã thành công:</label>
+                    <div id="recoveredTextBox" class="text-box text-success">Chưa có dữ liệu nào được nhận từ Kênh truyền.</div>
+                </div>
+
+                <div class="row g-2 mb-3">
+                    <div class="col-4">
+                        <div class="p-2 border border-secondary rounded text-center small">
+                            <span class="text-secondary d-block">Thuật toán Nguồn:</span>
+                            <span id="srcAlgBadge" class="fw-bold text-info">---</span>
+                        </div>
+                    </div>
+                    <div class="col-4">
+                        <div class="p-2 border border-secondary rounded text-center small">
+                            <span class="text-secondary d-block">Mã hóa Kênh:</span>
+                            <span id="chnAlgBadge" class="fw-bold text-warning">---</span>
+                        </div>
+                    </div>
+                    <div class="col-4">
+                        <div class="p-2 border border-secondary rounded text-center small">
+                            <span class="text-secondary d-block">CRC16 Kiểm tra:</span>
+                            <span id="crcValueText" class="fw-bold text-white">---</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="d-flex justify-content-between align-items-center mt-3 pt-2 border-top border-secondary">
+                    <span class="small text-muted">Tự động bắt khung và đồng bộ FSM UART</span>
+                    <button id="btnResetMetrics" class="btn btn-outline-secondary btn-sm"><i class="fa-solid fa-arrows-rotate me-1"></i> Đặt lại Thống kê</button>
+                </div>
+            </div>
+
+            <!-- Biểu đồ Hiệu suất sửa lỗi -->
+            <div class="card p-3">
+                <h6 class="fw-bold text-secondary mb-2 small text-uppercase"><i class="fa-solid fa-chart-simple me-1"></i> Biểu đồ Số bit sửa thành công qua từng gói</h6>
+                <div style="height: 180px;">
+                    <canvas id="correctionChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cột phải: Thanh tra gói tin & Lịch sử -->
+        <div class="col-lg-6">
+            <div class="card p-3 mb-4">
+                <h5 class="fw-bold mb-3 text-success"><i class="fa-solid fa-shield-halved me-2"></i>2. Thanh tra Giải mã Kênh & Sửa lỗi</h5>
+
+                <div class="mb-3">
+                    <label class="small text-secondary fw-semibold">Chuỗi Payload từ mã nhận được (Hex):</label>
+                    <div id="hexPayloadBox" class="p-2 border border-secondary rounded small font-monospace text-warning text-break" style="background:#060912;">---</div>
+                </div>
+
+                <div class="mb-3">
+                    <label class="small text-secondary fw-semibold">Báo cáo chẩn đoán tầng sửa lỗi kênh:</label>
+                    <div id="diagnosisBox" class="p-3 border border-secondary rounded small" style="background: #0d1526;">
+                        <span class="text-secondary">Đang chờ khung truyền...</span>
+                    </div>
+                </div>
+
+                <!-- History Table -->
+                <h6 class="fw-bold text-secondary mt-3 mb-2 small text-uppercase">Lịch sử các gói tin đã khôi phục</h6>
+                <div class="table-responsive" style="max-height: 240px; overflow-y: auto;">
+                    <table class="table table-dark table-sm table-striped small align-middle mb-0">
+                        <thead>
+                            <tr class="text-secondary">
+                                <th>Seq</th>
+                                <th>CRC16</th>
+                                <th>Bit sửa</th>
+                                <th>Lỗi kép</th>
+                                <th>Kích thước</th>
+                                <th>Trích đoạn khôi phục</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let ws = null;
+    let isConnected = false;
+    let correctionChart = null;
+    const chartLabels = [];
+    const chartData = [];
+
+    const SRC_NAMES = { 0: "Raw", 1: "Huffman", 2: "Arithmetic", 3: "LZW" };
+    const CHN_NAMES = { 0: "None", 1: "Hamming(8,4)", 2: "Cyclic(7,4)" };
+
+    function initChart() {
+        const ctx = document.getElementById('correctionChart').getContext('2d');
+        correctionChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: chartLabels,
+                datasets: [{
+                    label: 'Số bit sửa được',
+                    data: chartData,
+                    backgroundColor: '#10b981',
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { display: false },
+                    y: {
+                        beginAtZero: true,
+                        ticks: { stepSize: 1, color: '#94a3b8' },
+                        grid: { color: '#23314d' }
+                    }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+    }
+
+    async function refreshPorts() {
+        try {
+            const res = await fetch('/api/ports');
+            const data = await res.json();
+            const sel = document.getElementById('portSelect');
+            sel.innerHTML = '';
+            data.ports.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p;
+                opt.innerText = p;
+                if (p === data.current) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            updateConnectionUI(data.connected, data.current);
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    function updateConnectionUI(connected, port) {
+        isConnected = connected;
+        const pill = document.getElementById('connStatusPill');
+        const dot = document.getElementById('connDot');
+        const text = document.getElementById('connText');
+        const btn = document.getElementById('btnToggleConnect');
+
+        if (connected) {
+            pill.className = 'badge bg-success py-2 px-3';
+            dot.className = 'status-dot dot-green';
+            text.innerText = `Đã kết nối: ${port}`;
+            btn.innerText = 'Ngắt kết nối';
+            btn.className = 'btn btn-outline-danger';
+        } else {
+            pill.className = 'badge bg-danger py-2 px-3';
+            dot.className = 'status-dot dot-red';
+            text.innerText = 'Chưa kết nối COM';
+            btn.innerText = 'Kết nối';
+            btn.className = 'btn btn-green';
+        }
+    }
+
+    document.getElementById('btnRefreshPorts').addEventListener('click', refreshPorts);
+
+    document.getElementById('btnToggleConnect').addEventListener('click', async () => {
+        if (isConnected) {
+            await fetch('/api/disconnect', { method: 'POST' });
+            updateConnectionUI(false, '');
+        } else {
+            const port = document.getElementById('portSelect').value;
+            const res = await fetch('/api/connect', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ port })
+            });
+            const d = await res.json();
+            if (d.status === 'ok') {
+                updateConnectionUI(true, port);
+            } else {
+                alert('Lỗi kết nối: ' + d.message);
+            }
+        }
+    });
+
+    document.getElementById('btnResetMetrics').addEventListener('click', async () => {
+        await fetch('/api/reset_metrics', { method: 'POST' });
+        chartLabels.length = 0;
+        chartData.length = 0;
+        correctionChart.update();
+    });
+
+    function initWebSocket() {
+        ws = new WebSocket(`ws://${location.host}/ws`);
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'RX_EVENT') {
+                handleRxEvent(data);
+            }
+        };
+        ws.onclose = () => {
+            setTimeout(initWebSocket, 2000);
+        };
+    }
+
+    function handleRxEvent(d) {
+        document.getElementById('mTotalFrames').innerText = d.total_frames;
+        document.getElementById('mSingleErrors').innerHTML = `${d.single_err} <span class="fs-6 text-muted">bit</span>`;
+        document.getElementById('mDoubleErrors').innerHTML = `${d.double_err} <span class="fs-6 text-muted">bit</span>`;
+        document.getElementById('mCorrectionRate').innerText = `${d.correction_rate}%`;
+        document.getElementById('mFER').innerText = `${d.fer}%`;
+        document.getElementById('mCR').innerText = `${d.cr}x`;
+
+        // Text đã giải nén
+        document.getElementById('recoveredTextBox').innerText = d.text;
+        document.getElementById('srcAlgBadge').innerText = SRC_NAMES[d.src_alg] || d.src_alg;
+        document.getElementById('chnAlgBadge').innerText = CHN_NAMES[d.chn_alg] || d.chn_alg;
+        document.getElementById('crcValueText').innerText = `${d.crc_rx} (Tính: ${d.crc_calc})`;
+        document.getElementById('hexPayloadBox').innerText = d.hex_payload;
+
+        const crcBadge = document.getElementById('crcBadge');
+        if (d.crc_valid) {
+            crcBadge.className = 'badge bg-success px-3 py-2';
+            crcBadge.innerHTML = '<i class="fa-solid fa-circle-check me-1"></i> CRC16 MATCH (Gói tin nguyên vẹn)';
+        } else {
+            crcBadge.className = 'badge bg-danger px-3 py-2';
+            crcBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i> CRC16 MISMATCH (Gói tin bị lỗi)';
+        }
+
+        // Chẩn đoán sửa lỗi
+        let diagHtml = `<div><strong>Trạng thái sửa lỗi:</strong> `;
+        if (d.single_err > 0) {
+            diagHtml += `<span class="text-success"><i class="fa-solid fa-wand-magic-sparkles me-1"></i> Đã sửa thành công ${d.single_err} bit lỗi qua ma trận Syndrome!</span>`;
+        } else if (d.double_err > 0) {
+            diagHtml += `<span class="text-danger"><i class="fa-solid fa-circle-xmark me-1"></i> Phát hiện ${d.double_err} lỗi kép vượt quá khả năng sửa!</span>`;
+        } else {
+            diagHtml += `<span class="text-info"><i class="fa-solid fa-shield me-1"></i> Không có lỗi bit nào xuất hiện trên đường truyền.</span>`;
+        }
+        diagHtml += `</div><div class="mt-1 text-muted small">Kích thước: Payload ${d.payload_len}B $\\to$ Nén ${d.comp_len}B $\\to$ Giải nén ${d.raw_len}B (CR: ${d.cr}x)</div>`;
+        document.getElementById('diagnosisBox').innerHTML = diagHtml;
+
+        // Cập nhật biểu đồ
+        chartLabels.push(`#${d.seq}`);
+        chartData.push(d.single_err);
+        if (chartLabels.length > 25) {
+            chartLabels.shift();
+            chartData.shift();
+        }
+        correctionChart.update();
+
+        // Bảng log
+        const tbody = document.getElementById('logTableBody');
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>#${d.seq}</td>
+            <td><span class="badge ${d.crc_valid ? 'bg-success' : 'bg-danger'}">${d.crc_valid ? 'PASS' : 'FAIL'}</span></td>
+            <td class="text-success fw-bold">${d.single_err}b</td>
+            <td class="${d.double_err > 0 ? 'text-danger fw-bold' : 'text-muted'}">${d.double_err}b</td>
+            <td>${d.raw_len}B</td>
+            <td class="text-truncate" style="max-width: 180px;">${d.text}</td>
+        `;
+        tbody.insertBefore(row, tbody.firstChild);
+        if (tbody.children.length > 20) tbody.removeChild(tbody.lastChild);
+    }
+
+    refreshPorts();
+    initChart();
+    initWebSocket();
+</script>
+</body>
+</html>
