@@ -13,6 +13,7 @@ typedef struct {
     source_alg_t src_alg;
     channel_alg_t chn_alg;
     uint8_t seq;
+    uint8_t img_idx;
 } tx_settings_t;
 
 typedef struct {

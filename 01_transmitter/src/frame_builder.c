@@ -68,7 +68,7 @@ size_t build_tx_frame(const uint8_t *input, size_t input_len,
     /* 3. ĐÓNG GÓI KHUNG (FRAMING) */
     out_frame[0] = FRAME_SOF;
     out_frame[1] = settings->seq;
-    out_frame[2] = (uint8_t)settings->src_alg;
+    out_frame[2] = (uint8_t)((settings->src_alg & 0x0F) | ((settings->img_idx & 0x0F) << 4));
     out_frame[3] = (uint8_t)settings->chn_alg;
     out_frame[4] = (uint8_t)payload_len;
 

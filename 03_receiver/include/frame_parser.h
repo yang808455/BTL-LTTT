@@ -14,6 +14,7 @@ typedef struct {
     uint8_t seq;
     source_alg_t src_alg;
     channel_alg_t chn_alg;
+    uint8_t img_idx;
     uint8_t payload[FRAME_MAX_PAYLOAD_LEN];
     uint8_t payload_len;
     uint16_t received_crc;

@@ -1,39 +1,104 @@
 #include <Arduino.h>
+#include <U8g2lib.h>
 #include "tx_config.h"
 #include "frame_builder.h"
+#include "../../shared/sample_images.h"
+#include "../../shared/crc16.h"
 
-static HardwareSerial SerialChannel(1); /* UART1 kết nối sang Bo mạch Kênh */
+/* Khởi tạo màn hình OLED SSD1306 qua Software I2C (Ổn định tuyệt đối trên ESP32-C3) */
+static U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(
+    U8G2_R0, 
+    /* clock=*/ PIN_OLED_SCL, 
+    /* data=*/ PIN_OLED_SDA, 
+    /* reset=*/ U8X8_PIN_NONE
+);
+
+/* UART1 kết nối 2 chiều với bo Kênh truyền */
+static HardwareSerial SerialChannel(1);
 
 static tx_settings_t g_tx_settings = {
-    .src_alg = SRC_ALG_HUFFMAN,
-    .chn_alg = CHN_ALG_HAMMING_84,
-    .seq = 0
+    .src_alg = SRC_ALG_NONE,    /* Truyền trực tiếp ảnh Bitmap 128 bytes/chunk (không qua bảng ASCII Huffman) */
+    .chn_alg = CHN_ALG_NONE,    /* Bắt đầu ở chế độ Direct (Kênh tốt) */
+    .seq = 0,
+    .img_idx = 0
 };
 
-static String g_current_payload = DEFAULT_PAYLOAD_TEXT;
-static bool g_auto_send = true;
-static unsigned long g_send_interval_ms = DEFAULT_TX_INTERVAL_MS;
+static uint8_t g_current_image_idx = 0;
+static uint8_t g_current_chunk_idx = 0;
 static unsigned long g_last_send_time = 0;
+static unsigned long g_last_btn_time = 0;
+static uint8_t g_last_rec_mode = CHN_ALG_NONE;
+static float g_last_rx_ber = 0.0f;
+static bool g_auto_adaptive = true; /* Bật / Tắt chế độ tự thích nghi */
 
-/* Hàm chuyển mảng byte sang chuỗi Hex để gửi lên Web */
-static String bytes_to_hex(const uint8_t *data, size_t len) {
-    String hex = "";
-    for (size_t i = 0; i < len; i++) {
-        if (data[i] < 0x10) hex += "0";
-        hex += String(data[i], HEX);
-    }
-    hex.toUpperCase();
-    return hex;
+/* Cập nhật giao diện màn hình OLED 1: CHỈ HIỂN THỊ TÍN HIỆU ẢNH THUẦN TÚY (CĂN GIỮA) */
+static void update_oled_display() {
+    u8g2.clearBuffer();
+
+    /* Khung viền bao quanh tín hiệu ảnh */
+    u8g2.drawFrame(31, 0, 66, 64);
+
+    /* Căn giữa màn hình 128x64: x = 32, y = 0, rộng 64 (8 bytes), cao 64 */
+    const uint8_t *img_ptr = g_sample_images[g_current_image_idx];
+    u8g2.drawBitmap(32, 0, 8, 64, img_ptr);
+
+    u8g2.sendBuffer();
 }
 
-/* Thực hiện đóng gói và phát 1 gói tin */
-static void transmit_packet(const String &text_data) {
+/* Xử lý lệnh JSON từ PC Dashboard qua cổng USB CDC */
+static void process_pc_command(const String &cmd_str) {
+    if (cmd_str.indexOf("\"cmd\":\"PING\"") >= 0 || cmd_str.indexOf("\"PING\"") >= 0) {
+        Serial.printf("{\"node\":\"TX\",\"status\":\"OK\",\"img_idx\":%d,\"chn_alg\":%d,\"seq\":%d}\n",
+                      g_current_image_idx, (int)g_tx_settings.chn_alg, g_tx_settings.seq);
+    } else if (cmd_str.indexOf("\"cmd\":\"SET_IMAGE\"") >= 0) {
+        int idx_pos = cmd_str.indexOf("\"idx\":");
+        if (idx_pos >= 0) {
+            int new_idx = cmd_str.substring(idx_pos + 6).toInt();
+            if (new_idx >= 0 && new_idx < SAMPLE_IMAGE_COUNT) {
+                g_current_image_idx = new_idx;
+                g_current_chunk_idx = 0;
+                g_last_send_time = 0; /* Phát ngay lập tức */
+                update_oled_display();
+                Serial.printf("{\"node\":\"TX\",\"event\":\"IMAGE_CHANGED\",\"img_idx\":%d}\n", g_current_image_idx);
+            }
+        }
+    } else if (cmd_str.indexOf("\"cmd\":\"SET_ADAPTIVE\"") >= 0) {
+        int pos = cmd_str.indexOf("\"val\":");
+        if (pos >= 0) {
+            int val = cmd_str.substring(pos + 6).toInt();
+            g_auto_adaptive = (val != 0);
+            Serial.printf("{\"node\":\"TX\",\"event\":\"ADAPTIVE_TOGGLE\",\"auto\":%s}\n", g_auto_adaptive ? "true" : "false");
+        }
+    } else if (cmd_str.indexOf("\"cmd\":\"SET_MODE\"") >= 0) {
+        int mode_pos = cmd_str.indexOf("\"mode\":");
+        if (mode_pos >= 0) {
+            int new_mode = cmd_str.substring(mode_pos + 7).toInt();
+            if (new_mode >= 0 && new_mode <= 2) {
+                g_tx_settings.chn_alg = (channel_alg_t)new_mode;
+                g_auto_adaptive = false; /* Chuyển thủ công thì tạm tắt auto để không bị feedback đè */
+                update_oled_display();
+                Serial.printf("{\"node\":\"TX\",\"event\":\"MODE_OVERRIDE\",\"chn_alg\":%d,\"auto\":false}\n", (int)g_tx_settings.chn_alg);
+            }
+        }
+    }
+}
+
+/* Gửi 1 mảnh của ảnh 64x64 qua Kênh */
+static void transmit_image_chunk() {
+    const uint8_t *full_img = g_sample_images[g_current_image_idx];
+    size_t offset = g_current_chunk_idx * SAMPLE_IMAGE_CHUNK_SIZE;
+    const uint8_t *chunk_data = full_img + offset;
+
+    static uint8_t s_frame_super_seq = 0;
+    /* Khóa chặt 3 bit thấp của seq luôn luôn là chunk_idx (0..7) để máy thu không bao giờ lệch vị trí */
+    g_tx_settings.seq = (uint8_t)((s_frame_super_seq << 3) | (g_current_chunk_idx & 0x07));
+    g_tx_settings.img_idx = g_current_image_idx;
     uint8_t frame_buf[FRAME_MAX_TOTAL_LEN];
     tx_metrics_t metrics;
 
     size_t frame_len = build_tx_frame(
-        (const uint8_t*)text_data.c_str(),
-        text_data.length(),
+        chunk_data,
+        SAMPLE_IMAGE_CHUNK_SIZE,
         &g_tx_settings,
         frame_buf,
         sizeof(frame_buf),
@@ -45,103 +110,103 @@ static void transmit_packet(const String &text_data) {
         SerialChannel.write(frame_buf, frame_len);
         SerialChannel.flush();
 
-        /* Gửi thông điệp JSON lên Web Dashboard qua cổng USB Serial */
-        Serial.print("{\"type\":\"TX_EVENT\",");
-        Serial.print("\"seq\":"); Serial.print(g_tx_settings.seq); Serial.print(",");
-        Serial.print("\"src_alg\":"); Serial.print((int)g_tx_settings.src_alg); Serial.print(",");
-        Serial.print("\"chn_alg\":"); Serial.print((int)g_tx_settings.chn_alg); Serial.print(",");
-        Serial.print("\"raw_len\":"); Serial.print(metrics.raw_len); Serial.print(",");
-        Serial.print("\"comp_len\":"); Serial.print(metrics.compressed_len); Serial.print(",");
-        Serial.print("\"comp_bits\":"); Serial.print(metrics.compressed_bits); Serial.print(",");
-        Serial.print("\"encoded_len\":"); Serial.print(metrics.encoded_len); Serial.print(",");
-        Serial.print("\"total_frame_len\":"); Serial.print(frame_len); Serial.print(",");
-        Serial.print("\"cr\":"); Serial.print(metrics.compression_ratio, 2); Serial.print(",");
-        Serial.print("\"crc\":\"0x"); Serial.print(metrics.crc16, HEX); Serial.print("\",");
-        Serial.print("\"raw_text\":\""); Serial.print(text_data); Serial.print("\",");
-        Serial.print("\"hex_frame\":\""); Serial.print(bytes_to_hex(frame_buf, frame_len)); Serial.print("\"");
-        Serial.println("}");
+        /* Xuất JSON Telemetry chuẩn hóa cho Python App */
+        Serial.printf("{\"node\":\"TX\",\"seq\":%d,\"img_idx\":%d,\"chunk\":%d,\"src_alg\":%d,\"chn_alg\":%d,\"raw_len\":%u,\"comp_len\":%u,\"frame_len\":%u,\"cr\":%.2f}\n",
+                      g_tx_settings.seq, g_current_image_idx, g_current_chunk_idx + 1,
+                      (int)g_tx_settings.src_alg, (int)g_tx_settings.chn_alg,
+                      metrics.raw_len, metrics.compressed_len, frame_len, metrics.compression_ratio);
 
-        g_tx_settings.seq++;
+        if (g_current_chunk_idx == (SAMPLE_IMAGE_NUM_CHUNKS - 1)) {
+            s_frame_super_seq++;
+        }
+        g_current_chunk_idx = (g_current_chunk_idx + 1) % SAMPLE_IMAGE_NUM_CHUNKS;
     }
 }
 
-/* Xử lý lệnh JSON gửi từ Web Dashboard xuống bo mạch qua USB CDC */
-static void process_pc_command(const String &cmd_str) {
-    if (cmd_str.indexOf("\"cmd\":\"SEND\"") >= 0) {
-        int data_start = cmd_str.indexOf("\"data\":\"");
-        if (data_start >= 0) {
-            data_start += 8;
-            int data_end = cmd_str.indexOf("\"", data_start);
-            if (data_end > data_start) {
-                String custom_text = cmd_str.substring(data_start, data_end);
-                transmit_packet(custom_text);
+/* Đọc và xử lý gói tin Feedback ngược từ Kênh (Rx -> Ch -> Tx) */
+static void process_incoming_feedback() {
+    static uint8_t fb_buf[FEEDBACK_FRAME_LEN];
+    static size_t fb_idx = 0;
+
+    while (SerialChannel.available() > 0) {
+        uint8_t b = SerialChannel.read();
+
+        if (fb_idx == 0) {
+            if (b == FRAME_SOF_FEEDBACK) {
+                fb_buf[fb_idx++] = b;
             }
         } else {
-            transmit_packet(g_current_payload);
-        }
-    } else if (cmd_str.indexOf("\"cmd\":\"SET_CONFIG\"") >= 0) {
-        int src_idx = cmd_str.indexOf("\"src_alg\":");
-        if (src_idx >= 0) {
-            g_tx_settings.src_alg = (source_alg_t)cmd_str.substring(src_idx + 10).toInt();
-        }
-        int chn_idx = cmd_str.indexOf("\"chn_alg\":");
-        if (chn_idx >= 0) {
-            g_tx_settings.chn_alg = (channel_alg_t)cmd_str.substring(chn_idx + 10).toInt();
-        }
-        int auto_idx = cmd_str.indexOf("\"auto_send\":");
-        if (auto_idx >= 0) {
-            g_auto_send = (cmd_str.indexOf("\"auto_send\":true") >= 0);
-        }
-        int interval_idx = cmd_str.indexOf("\"interval_ms\":");
-        if (interval_idx >= 0) {
-            g_send_interval_ms = cmd_str.substring(interval_idx + 14).toInt();
-            if (g_send_interval_ms < 100) g_send_interval_ms = 100;
-        }
-        int payload_idx = cmd_str.indexOf("\"payload\":\"");
-        if (payload_idx >= 0) {
-            payload_idx += 11;
-            int p_end = cmd_str.indexOf("\"", payload_idx);
-            if (p_end > payload_idx) {
-                g_current_payload = cmd_str.substring(payload_idx, p_end);
+            fb_buf[fb_idx++] = b;
+            if (fb_idx == FEEDBACK_FRAME_LEN) {
+                if (fb_buf[FEEDBACK_FRAME_LEN - 1] == FRAME_EOF) {
+                    feedback_frame_t *fb = (feedback_frame_t*)fb_buf;
+                    uint16_t calc_crc = crc16_ccitt(&fb_buf[1], 5);
+                    uint16_t pkt_crc = ((uint16_t)fb_buf[6] << 8) | fb_buf[7];
+
+                    if (calc_crc == pkt_crc) {
+                        /* TỰ THÍCH NGHI: Đổi Mode theo phản hồi từ Máy thu (chỉ khi bật Auto) */
+                        channel_alg_t new_mode = (channel_alg_t)fb->recommended_mode;
+                        if (g_auto_adaptive && (new_mode != g_tx_settings.chn_alg)) {
+                            g_tx_settings.chn_alg = new_mode;
+                            g_last_rec_mode = new_mode;
+                            Serial.printf("{\"node\":\"TX\",\"event\":\"ADAPTIVE_SWITCH\",\"chn_alg\":%d,\"ber\":%.1f}\n",
+                                          (int)new_mode, (float)fb->measured_ber_x10 / 10.0f);
+                        }
+                        g_last_rx_ber = (float)fb->measured_ber_x10 / 10.0f;
+                    }
+                }
+                fb_idx = 0;
             }
         }
-        /* Phản hồi trạng thái */
-        Serial.print("{\"type\":\"CONFIG_ACK\",\"src_alg\":");
-        Serial.print((int)g_tx_settings.src_alg);
-        Serial.print(",\"chn_alg\":");
-        Serial.print((int)g_tx_settings.chn_alg);
-        Serial.print(",\"auto_send\":");
-        Serial.print(g_auto_send ? "true" : "false");
-        Serial.print(",\"interval_ms\":");
-        Serial.print(g_send_interval_ms);
-        Serial.println("}");
     }
 }
 
 void setup() {
-    /* Khởi tạo USB CDC debug & giao tiếp với Web Dashboard */
     Serial.begin(115200);
 
-    /* Khởi tạo Hardware UART1 phát dữ liệu sang ESP32 Kênh */
-    SerialChannel.begin(UART_BAUDRATE, SERIAL_8N1, PIN_UART1_RX, PIN_UART1_TX);
+    /* Khởi tạo nút nhấn đổi ảnh (Pull-up nội) */
+    pinMode(PIN_BTN_IMAGE, INPUT_PULLUP);
 
-    delay(1000);
-    Serial.println("{\"type\":\"NODE_READY\",\"node\":\"TRANSMITTER\",\"version\":\"1.0\"}");
+    /* Khởi tạo màn hình OLED qua Software I2C */
+    u8g2.begin();
+    u8g2.setContrast(255);
+
+    /* Khởi tạo UART1 hai chiều nối với Kênh (RX: 20, TX: 21) */
+    SerialChannel.begin(TX_UART_BAUDRATE, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+
+    update_oled_display();
+    Serial.println("{\"node\":\"TX\",\"status\":\"READY\"}");
 }
 
 void loop() {
-    /* Đọc lệnh điều khiển từ Web Dashboard qua USB */
-    if (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
-        if (line.length() > 0) {
-            process_pc_command(line);
+    /* 1. Tiếp nhận lệnh điều khiển từ PC qua cổng USB */
+    if (Serial.available() > 0) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.length() > 0) {
+            process_pc_command(cmd);
         }
     }
 
-    /* Phát tự động theo chu kỳ nếu bật auto_send */
-    if (g_auto_send && (millis() - g_last_send_time >= g_send_interval_ms)) {
+    /* 2. Xử lý nút nhấn đổi ảnh mẫu trên mạch */
+    if (digitalRead(PIN_BTN_IMAGE) == LOW) {
+        if (millis() - g_last_btn_time > 300) {
+            g_current_image_idx = (g_current_image_idx + 1) % SAMPLE_IMAGE_COUNT;
+            g_current_chunk_idx = 0;
+            g_last_btn_time = millis();
+            g_last_send_time = 0; /* Phát ngay lập tức */
+            update_oled_display();
+            Serial.printf("{\"node\":\"TX\",\"event\":\"BUTTON_IMAGE_CHANGED\",\"img_idx\":%d}\n", g_current_image_idx);
+        }
+    }
+
+    /* 3. Tiếp nhận luồng Feedback thích nghi từ Máy thu */
+    process_incoming_feedback();
+
+    /* 4. Phát chu kỳ từng mảnh ảnh */
+    if (millis() - g_last_send_time >= DEFAULT_TX_INTERVAL_MS) {
         g_last_send_time = millis();
-        transmit_packet(g_current_payload);
+        transmit_image_chunk();
+        update_oled_display();
     }
 }

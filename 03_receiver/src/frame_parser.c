@@ -74,7 +74,8 @@ bool frame_parser_process_byte(uint8_t byte_in, parsed_frame_t *out_frame) {
             if (byte_in == FRAME_EOF && out_frame) {
                 out_frame->total_frame_len = s_buf_idx;
                 out_frame->seq = s_buf[1];
-                out_frame->src_alg = (source_alg_t)s_buf[2];
+                out_frame->src_alg = (source_alg_t)(s_buf[2] & 0x0F);
+                out_frame->img_idx = (s_buf[2] >> 4) & 0x0F;
                 out_frame->chn_alg = (channel_alg_t)s_buf[3];
                 out_frame->payload_len = s_payload_len;
 
