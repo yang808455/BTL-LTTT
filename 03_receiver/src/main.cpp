@@ -40,13 +40,91 @@ static unsigned long g_last_oled_time = 0;
 static unsigned long g_last_feedback_time = 0;
 static uint8_t g_fb_seq = 0;
 static bool s_oled_needs_update = true;
+static bool g_crc_check_enabled = true; /* Cờ Bật / Tắt kiểm tra CRC16 */
 
-/* Tắt hoàn toàn 3 đèn LED chỉ thị ở máy thu theo yêu cầu người dùng */
+/* Giám sát công tắc gạt 3 nấc chuyển Baudrate tức thì */
+static uint32_t g_current_baudrate = RX_UART_BAUDRATE;
+static unsigned long g_last_baud_sw_time = 0;
+
+static uint32_t read_switch_baudrate() {
+    int sw1 = digitalRead(PIN_SW_BAUD_1); // GPIO 2 (kéo lên 1)
+    int sw2 = digitalRead(PIN_SW_BAUD_2); // GPIO 3 (kéo lên 1)
+
+    if (sw1 == 0 && sw2 == 1) {
+        return 9600;    /* Nấc 1: Gạt sang TRÁI (GPIO 2 chạm GND) */
+    } else if (sw1 == 1 && sw2 == 1) {
+        return 38400;   /* Nấc 2: Ở GIỮA (hở mạch cả 2 bên) */
+    } else if (sw1 == 1 && sw2 == 0) {
+        return 115200;  /* Nấc 3: Gạt sang PHẢI (GPIO 3 chạm GND) */
+    }
+    return 115200;      /* Mặc định an toàn */
+}
+
+static void check_and_update_baudrate() {
+    if (millis() - g_last_baud_sw_time < 50) return; // Debounce 50ms
+    g_last_baud_sw_time = millis();
+
+    uint32_t target_baud = read_switch_baudrate();
+    if (target_baud != g_current_baudrate) {
+        g_current_baudrate = target_baud;
+        SerialFromChannel.flush();
+        SerialFromChannel.begin(g_current_baudrate, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+        Serial.printf("{\"node\":\"RX\",\"event\":\"BAUD_CHANGE\",\"baud\":%u}\n", g_current_baudrate);
+    }
+}
+
+/* 3 Chân đèn LED RGB trên bo Máy thu: Đỏ (GPIO 5), Xanh lá (GPIO 6), Xanh dương (GPIO 7) */
+/* Cực âm nối chung GND bo Máy thu, Cực dương qua trở 220Ω vào chân GPIO */
+#define LED_BRIGHTNESS_DEFAULT  0.01f  /* Cố định độ sáng 1% (duty tối đa 3 / 255) */
+
+static bool g_led_test_override = false; /* Cờ ưu tiên kiểm tra LED từ PC (ngăn hàm nhận ảnh tự đè LED) */
+
+static void set_rgb_leds_pwm(uint8_t r, uint8_t g, uint8_t b, float brightness = LED_BRIGHTNESS_DEFAULT) {
+    uint32_t duty_r = (uint32_t)(r * brightness + 0.5f);
+    uint32_t duty_g = (uint32_t)(g * brightness + 0.5f);
+    uint32_t duty_b = (uint32_t)(b * brightness + 0.5f);
+
+    /* Cực âm nối chung GND: Kích mức HIGH (xung dương) để sáng */
+    analogWrite(PIN_RGB_R, duty_r);
+    analogWrite(PIN_RGB_G, duty_g);
+    analogWrite(PIN_RGB_B, duty_b);
+}
+
+static void set_rgb_leds_digital(int r, int g, int b) {
+    pinMode(PIN_RGB_R, OUTPUT);
+    pinMode(PIN_RGB_G, OUTPUT);
+    pinMode(PIN_RGB_B, OUTPUT);
+    digitalWrite(PIN_RGB_R, r ? HIGH : LOW);
+    digitalWrite(PIN_RGB_G, g ? HIGH : LOW);
+    digitalWrite(PIN_RGB_B, b ? HIGH : LOW);
+}
+
+static void leds_init() {
+    pinMode(PIN_RGB_R, OUTPUT);
+    pinMode(PIN_RGB_G, OUTPUT);
+    pinMode(PIN_RGB_B, OUTPUT);
+    set_rgb_leds_pwm(0, 0, 0);
+}
+
+/* Tự động chỉ thị Mode thích nghi theo mức BER đo được (độ sáng 10%) */
 static void update_led_indicators(channel_alg_t mode) {
-    (void)mode;
-    pinMode(PIN_LED_GREEN, INPUT);
-    pinMode(PIN_LED_YELLOW, INPUT);
-    pinMode(PIN_LED_RED, INPUT);
+    if (g_led_test_override) {
+        return; /* Đang trong chế độ kiểm tra từ PC, giữ nguyên trạng thái test */
+    }
+    switch (mode) {
+        case CHN_ALG_NONE:
+            set_rgb_leds_pwm(0, 255, 0);   /* Mode Direct: LED Xanh lá (chân 6) sáng 10% */
+            break;
+        case CHN_ALG_HAMMING_84:
+            set_rgb_leds_pwm(0, 0, 255);   /* Mode Hamming: LED Xanh dương (chân 7) sáng 10% */
+            break;
+        case CHN_ALG_CYCLIC_74:
+            set_rgb_leds_pwm(255, 0, 0);   /* Mode Cyclic: LED Đỏ (chân 5) sáng 10% */
+            break;
+        default:
+            set_rgb_leds_pwm(0, 0, 0);
+            break;
+    }
 }
 
 /* Cập nhật giao diện màn hình OLED 3: CHỈ HIỂN THỊ TÍN HIỆU ẢNH KHÔI PHỤC (CĂN GIỮA) */
@@ -86,8 +164,17 @@ static void send_feedback_packet() {
 /* Xử lý lệnh JSON điều khiển từ PC qua cổng USB CDC */
 static void process_pc_command(const String &cmd_str) {
     if (cmd_str.indexOf("\"cmd\":\"PING\"") >= 0 || cmd_str.indexOf("\"PING\"") >= 0) {
-        Serial.printf("{\"node\":\"RX\",\"status\":\"OK\",\"frames\":%u,\"fixed\":%u,\"ber\":%.2f,\"mode\":%d}\n",
-                      g_total_frames_received, g_total_bits_corrected, g_measured_ber * 100.0f, (int)g_current_mode);
+        Serial.printf("{\"node\":\"RX\",\"status\":\"OK\",\"frames\":%u,\"fixed\":%u,\"ber\":%.2f,\"mode\":%d,\"crc_en\":%s}\n",
+                      g_total_frames_received, g_total_bits_corrected, g_measured_ber * 100.0f, (int)g_current_mode,
+                      g_crc_check_enabled ? "true" : "false");
+    } else if (cmd_str.indexOf("\"cmd\":\"SET_CRC_CHECK\"") >= 0) {
+        if (cmd_str.indexOf("\"enabled\":false") >= 0 || cmd_str.indexOf("\"val\":0") >= 0) {
+            g_crc_check_enabled = false;
+        } else {
+            g_crc_check_enabled = true;
+        }
+        Serial.printf("{\"node\":\"RX\",\"event\":\"CRC_CHECK_CHANGED\",\"enabled\":%s}\n",
+                      g_crc_check_enabled ? "true" : "false");
     } else if (cmd_str.indexOf("\"cmd\":\"RESET_STATS\"") >= 0) {
         g_total_bits_received = 0;
         g_total_bits_corrected = 0;
@@ -96,6 +183,80 @@ static void process_pc_command(const String &cmd_str) {
         memset(g_rx_image_buf, 0, sizeof(g_rx_image_buf));
         update_oled_display();
         Serial.println("{\"node\":\"RX\",\"status\":\"RESET\"}");
+    } else if (cmd_str.indexOf("\"cmd\":\"SET_LED\"") >= 0 || cmd_str.indexOf("\"cmd\":\"SET_RGB\"") >= 0 ||
+               cmd_str.startsWith("SET_LED") || cmd_str.startsWith("SET_RGB")) {
+        g_led_test_override = true; /* Khóa ưu tiên kiểm tra từ PC, ngăn hàm nhận ảnh tự đè LED */
+        int r = 0, g = 0, b = 0;
+        int bright_pct = 1; /* Mặc định 1% */
+
+        int b_pct_idx = cmd_str.indexOf("\"pct\":");
+        if (b_pct_idx >= 0) bright_pct = cmd_str.substring(b_pct_idx + 6).toInt();
+
+        /* Đọc các tham số r (Đỏ - GPIO 5), g (Xanh lá - GPIO 6), b (Xanh dương - GPIO 7) */
+        int r_idx = cmd_str.indexOf("\"r\":");
+        if (r_idx >= 0) r = cmd_str.substring(r_idx + 4).toInt();
+        int g_idx = cmd_str.indexOf("\"g\":");
+        if (g_idx >= 0) g = cmd_str.substring(g_idx + 4).toInt();
+        int b_idx = cmd_str.indexOf("\"b\":");
+        if (b_idx >= 0) b = cmd_str.substring(b_idx + 4).toInt();
+
+        /* Hỗ trợ thêm trường hợp gửi y (Vàng) thay cho b */
+        int y_idx = cmd_str.indexOf("\"y\":");
+        if (y_idx >= 0 && b_idx < 0) b = cmd_str.substring(y_idx + 4).toInt();
+
+        /* Hỗ trợ text thô: SET_RGB r g b [pct] */
+        if (cmd_str.startsWith("SET_LED") || cmd_str.startsWith("SET_RGB")) {
+            int pr = 0, pg = 0, pb = 0, ppct = 1;
+            int n = sscanf(cmd_str.c_str(), "%*s %d %d %d %d", &pr, &pg, &pb, &ppct);
+            if (n >= 3) {
+                r = pr; g = pg; b = pb;
+                if (n >= 4) bright_pct = ppct;
+            }
+        }
+
+        r = constrain(r, 0, 255);
+        g = constrain(g, 0, 255);
+        b = constrain(b, 0, 255);
+        bright_pct = constrain(bright_pct, 1, 100);
+
+        float bright_factor = (float)bright_pct / 100.0f;
+        set_rgb_leds_pwm((uint8_t)r, (uint8_t)g, (uint8_t)b, bright_factor);
+
+        uint32_t duty_r = (uint32_t)(r * bright_factor + 0.5f);
+        uint32_t duty_g = (uint32_t)(g * bright_factor + 0.5f);
+        uint32_t duty_b = (uint32_t)(b * bright_factor + 0.5f);
+
+        Serial.printf("{\"node\":\"RX\",\"event\":\"RGB_SET\",\"r\":%d,\"g\":%d,\"b\":%d,\"duty_r\":%u,\"duty_g\":%u,\"duty_b\":%u,\"pct\":%d}\n",
+                      r, g, b, duty_r, duty_g, duty_b, bright_pct);
+    } else if (cmd_str.indexOf("\"cmd\":\"RELEASE_LED\"") >= 0 || cmd_str.startsWith("RELEASE_LED")) {
+        g_led_test_override = false; /* Trả quyền điều khiển LED lại cho luồng ảnh hệ thống */
+        channel_alg_t active_led_mode = (g_current_mode != CHN_ALG_NONE) ? g_current_mode : g_recommended_mode;
+        update_led_indicators(active_led_mode);
+        Serial.println("{\"node\":\"RX\",\"event\":\"LED_RELEASED\"}");
+    } else if (cmd_str.indexOf("\"cmd\":\"SET_RAW\"") >= 0 || cmd_str.startsWith("SET_RAW")) {
+        g_led_test_override = true;
+        int r = 0, g = 0, b = 0;
+        int idxr = cmd_str.indexOf("\"r\":");
+        if (idxr >= 0) r = cmd_str.substring(idxr + 4).toInt();
+        int idxg = cmd_str.indexOf("\"g\":");
+        if (idxg >= 0) g = cmd_str.substring(idxg + 4).toInt();
+        int idxb = cmd_str.indexOf("\"b\":");
+        if (idxb >= 0) b = cmd_str.substring(idxb + 4).toInt();
+
+        /* Nếu dùng p5, p6, p7 */
+        int idx5 = cmd_str.indexOf("\"p5\":");
+        if (idx5 >= 0) r = cmd_str.substring(idx5 + 5).toInt();
+        int idx6 = cmd_str.indexOf("\"p6\":");
+        if (idx6 >= 0) g = cmd_str.substring(idx6 + 5).toInt();
+        int idx7 = cmd_str.indexOf("\"p7\":");
+        if (idx7 >= 0) b = cmd_str.substring(idx7 + 5).toInt();
+
+        if (cmd_str.startsWith("SET_RAW")) {
+            sscanf(cmd_str.c_str(), "SET_RAW %d %d %d", &r, &g, &b);
+        }
+
+        set_rgb_leds_digital(r, g, b);
+        Serial.printf("{\"node\":\"RX\",\"event\":\"RAW_SET\",\"r\":%d,\"g\":%d,\"b\":%d}\n", r, g, b);
     }
 }
 
@@ -168,8 +329,8 @@ static void process_received_frame(const parsed_frame_t *frame) {
     if (g_total_bits_received > 0) {
         float instant_ber = 0.0f;
         if (frame->chn_alg == CHN_ALG_NONE) {
-            /* Ở chế độ Direct không có parity: nếu CRC hỏng, đánh giá có lỗi kênh */
-            if (!frame->crc_valid) {
+            /* Ở chế độ Direct: nếu bật kiểm tra CRC và CRC hỏng thì đánh giá có lỗi kênh */
+            if (g_crc_check_enabled && !frame->crc_valid) {
                 instant_ber = 0.025f;
             }
         } else {
@@ -211,10 +372,8 @@ static void process_received_frame(const parsed_frame_t *frame) {
 void setup() {
     Serial.begin(115200);
 
-    /* Tắt hoàn toàn 3 chân LED máy thu theo yêu cầu người dùng */
-    pinMode(PIN_LED_GREEN, INPUT);
-    pinMode(PIN_LED_YELLOW, INPUT);
-    pinMode(PIN_LED_RED, INPUT);
+    /* Khởi tạo PWM điều khiển 3 LED Xanh (6), Vàng (7), Đỏ (10) - Độ sáng 30% */
+    leds_init();
 
     /* Khởi tạo bộ bóc tách khung UART */
     frame_parser_init();
@@ -223,14 +382,22 @@ void setup() {
     u8g2.begin();
     u8g2.setContrast(255);
 
-    /* UART0: Kết nối 2 chiều với Kênh truyền (RX: 20, TX: 21) */
-    SerialFromChannel.begin(RX_UART_BAUDRATE, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+    /* Khởi tạo 2 chân công tắc 3 nấc chuyển Baudrate */
+    pinMode(PIN_SW_BAUD_1, INPUT_PULLUP);
+    pinMode(PIN_SW_BAUD_2, INPUT_PULLUP);
+    g_current_baudrate = read_switch_baudrate();
+
+    /* UART0: Kết nối 2 chiều với Kênh truyền (RX: 20, TX: 21) theo Baudrate ban đầu */
+    SerialFromChannel.begin(g_current_baudrate, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
 
     update_oled_display();
     Serial.println("{\"node\":\"RX\",\"status\":\"READY\"}");
 }
 
 void loop() {
+    /* 0. Quét công tắc 3 nấc để đồng bộ Baudrate tức thời */
+    check_and_update_baudrate();
+
     /* 1. Tiếp nhận lệnh điều khiển từ PC qua cổng USB */
     if (Serial.available() > 0) {
         String cmd = Serial.readStringUntil('\n');

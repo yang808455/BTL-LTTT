@@ -13,8 +13,10 @@ venv/
 env/
 .env
 
-# IDEs
+# IDEs & System
 .vscode/
 .idea/
 *.swp
 *.bak
+Thumbs.db
+Desktop.ini

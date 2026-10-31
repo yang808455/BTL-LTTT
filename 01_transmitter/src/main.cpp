@@ -31,6 +31,37 @@ static uint8_t g_last_rec_mode = CHN_ALG_NONE;
 static float g_last_rx_ber = 0.0f;
 static bool g_auto_adaptive = true; /* Bật / Tắt chế độ tự thích nghi */
 
+/* Giám sát công tắc gạt 3 nấc chuyển Baudrate tức thì */
+static uint32_t g_current_baudrate = TX_UART_BAUDRATE;
+static unsigned long g_last_baud_sw_time = 0;
+
+static uint32_t read_switch_baudrate() {
+    int sw1 = digitalRead(PIN_SW_BAUD_1); // GPIO 2 (kéo lên 1)
+    int sw2 = digitalRead(PIN_SW_BAUD_2); // GPIO 3 (kéo lên 1)
+
+    if (sw1 == 0 && sw2 == 1) {
+        return 9600;    /* Nấc 1: Gạt sang TRÁI (GPIO 2 chạm GND) */
+    } else if (sw1 == 1 && sw2 == 1) {
+        return 38400;   /* Nấc 2: Ở GIỮA (hở mạch cả 2 bên) */
+    } else if (sw1 == 1 && sw2 == 0) {
+        return 115200;  /* Nấc 3: Gạt sang PHẢI (GPIO 3 chạm GND) */
+    }
+    return 115200;      /* Mặc định an toàn */
+}
+
+static void check_and_update_baudrate() {
+    if (millis() - g_last_baud_sw_time < 50) return; // Debounce 50ms
+    g_last_baud_sw_time = millis();
+
+    uint32_t target_baud = read_switch_baudrate();
+    if (target_baud != g_current_baudrate) {
+        g_current_baudrate = target_baud;
+        SerialChannel.flush();
+        SerialChannel.begin(g_current_baudrate, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+        Serial.printf("{\"node\":\"TX\",\"event\":\"BAUD_CHANGE\",\"baud\":%u}\n", g_current_baudrate);
+    }
+}
+
 /* Cập nhật giao diện màn hình OLED 1: CHỈ HIỂN THỊ TÍN HIỆU ẢNH THUẦN TÚY (CĂN GIỮA) */
 static void update_oled_display() {
     u8g2.clearBuffer();
@@ -171,14 +202,22 @@ void setup() {
     u8g2.begin();
     u8g2.setContrast(255);
 
-    /* Khởi tạo UART1 hai chiều nối với Kênh (RX: 20, TX: 21) */
-    SerialChannel.begin(TX_UART_BAUDRATE, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+    /* Khởi tạo 2 chân công tắc 3 nấc chuyển Baudrate */
+    pinMode(PIN_SW_BAUD_1, INPUT_PULLUP);
+    pinMode(PIN_SW_BAUD_2, INPUT_PULLUP);
+    g_current_baudrate = read_switch_baudrate();
+
+    /* Khởi tạo UART1 hai chiều nối với Kênh (RX: 20, TX: 21) theo Baudrate ban đầu */
+    SerialChannel.begin(g_current_baudrate, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
 
     update_oled_display();
     Serial.println("{\"node\":\"TX\",\"status\":\"READY\"}");
 }
 
 void loop() {
+    /* 0. Quét công tắc 3 nấc để đồng bộ Baudrate tức thời */
+    check_and_update_baudrate();
+
     /* 1. Tiếp nhận lệnh điều khiển từ PC qua cổng USB */
     if (Serial.available() > 0) {
         String cmd = Serial.readStringUntil('\n');

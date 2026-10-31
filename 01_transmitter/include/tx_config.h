@@ -14,4 +14,8 @@
 #define TX_UART_BAUDRATE        115200
 #define DEFAULT_TX_INTERVAL_MS  150 /* Thời gian giãn cách giữa các mảnh ảnh (150ms x 8 = 1.2s/ảnh) */
 
+/* Cấu hình công tắc gạt 3 nấc chuyển Baudrate tức thì */
+#define PIN_SW_BAUD_1           2   /* Bìa trái (GND -> 9600 bps) */
+#define PIN_SW_BAUD_2           3   /* Bìa phải (GND -> 115200 bps) | Ở giữa -> 38400 bps */
+
 #endif /* TX_CONFIG_H */

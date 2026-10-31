@@ -8,7 +8,7 @@
 /* Cấu hình chân phần cứng trên ESP32-C3 SuperMini Kênh truyền */
 #define PIN_OLED_SDA            8   /* I2C SDA màn hình OLED 2 */
 #define PIN_OLED_SCL            9   /* I2C SCL màn hình OLED 2 */
-#define PIN_POTENTIOMETER       3   /* Chân Analog ADC1 đọc điện áp biến trở 10k (GPIO 3 trên mạch thật) */
+#define PIN_POTENTIOMETER       0   /* Chân Analog ADC1 đọc điện áp biến trở 10k (GPIO 0 trên mạch thật) */
 
 /* Cổng UART0: Giao tiếp với Máy phát (Tx) */
 #define PIN_RX_FROM_TX          20  /* Nhận dữ liệu từ Tx (GPIO 21) */
@@ -19,6 +19,10 @@
 #define PIN_RX_FROM_RX          4   /* Nhận Feedback từ Rx (GPIO 21) */
 
 #define CHANNEL_BAUDRATE        115200
+
+/* Cấu hình công tắc gạt 3 nấc chuyển Baudrate tức thì */
+#define PIN_SW_BAUD_1           2   /* Bìa trái (GND -> 9600 bps) */
+#define PIN_SW_BAUD_2           3   /* Bìa phải (GND -> 115200 bps) | Ở giữa -> 38400 bps */
 
 typedef enum {
     NOISE_SCOPE_PAYLOAD_ONLY,

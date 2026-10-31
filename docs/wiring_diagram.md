@@ -23,14 +23,15 @@
 | **3.3V** | Cấp nguồn VCC cho OLED 1 | Cấp VCC cho OLED 2 & chân 1 biến trở | Cấp nguồn VCC cho OLED 3 | Đường nguồn 3.3V ổn áp |
 | **GPIO 8 (SDA)** | Nối chân SDA của **OLED 1** | Nối chân SDA của **OLED 2** | Nối chân SDA của **OLED 3** | Bus dữ liệu I2C |
 | **GPIO 9 (SCL)** | Nối chân SCL của **OLED 1** | Nối chân SCL của **OLED 2** | Nối chân SCL của **OLED 3** | Bus xung nhịp I2C |
-| **GPIO 3 (ADC)** | *(Để trống)* | **Chân giữa Biến trở 10kΩ** | *(Để trống)* | Đọc mức điện áp tương tự để chỉnh BER |
+| **GPIO 0 (ADC)** | *(Để trống)* | **Chân giữa Biến trở 10kΩ** | *(Để trống)* | Đọc mức điện áp tương tự để chỉnh BER |
+| **GPIO 1 (ADC)** | *(Để trống)* | *(Để trống)* | *(Để trống)* | Dự phòng ADC |
 | **GPIO 20** | Nhận Feedback từ **TX0 (GPIO 21)** Kênh | Nhận Data ảnh từ **TX (GPIO 21)** Máy phát | Gửi Feedback sang **RX1 (GPIO 4)** Kênh | Đường UART |
 | **GPIO 21** | Bắn Data ảnh sang **RX0 (GPIO 20)** Kênh | Forward Feedback về **RX (GPIO 20)** Máy phát | Nhận Data nhiễu từ **TX1 (GPIO 5)** Kênh | Đường UART |
-| **GPIO 5** | *(Để trống)* | **TX1:** Phát Data nhiễu sang **RX (GPIO 20)** Máy thu | *(Để trống)* | UART1 TX của Kênh |
+| **GPIO 5** | *(Để trống)* | **TX1:** Phát Data nhiễu sang **RX (GPIO 20)** Máy thu | **LED RGB: Kênh R (Đỏ)** | Qua trở $220\Omega$, Cathode nối GND |
 | **GPIO 4** | *(Để trống)* | **RX1:** Bắt Feedback từ **TX (GPIO 21)** Máy thu | *(Để trống)* | UART1 RX của Kênh |
-| **GPIO 10** | Nút nhấn đổi ảnh (chân kia nối GND) | *(Để trống)* | **LED Đỏ** (Mode Cyclic - Nhiễu cao) | Nối tiếp qua trở $220\Omega$ vào Anode LED |
-| **GPIO 7** | *(Để trống)* | *(Để trống)* | **LED Vàng** (Mode Hamming - Nhiễu vừa) | Nối tiếp qua trở $220\Omega$ vào Anode LED |
-| **GPIO 6** | *(Để trống)* | *(Để trống)* | **LED Xanh** (Mode Direct - Nhiễu thấp) | Nối tiếp qua trở $220\Omega$ vào Anode LED |
+| **GPIO 10** | Nút nhấn đổi ảnh (chân kia nối GND) | *(Để trống)* | *(Để trống)* | Nút bấm đổi ảnh TX |
+| **GPIO 7** | *(Để trống)* | *(Để trống)* | **LED RGB: Kênh B (Xanh dương)** | Qua trở $220\Omega$, Cathode nối GND |
+| **GPIO 6** | *(Để trống)* | *(Để trống)* | **LED RGB: Kênh G (Xanh lá)** | Qua trở $220\Omega$, Cathode nối GND |
 
 ---
 

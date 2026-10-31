@@ -556,9 +556,19 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         form.addRow("Đề Xuất Phản Hồi Ngược:", self.lbl_rx_rec_mode)
         layout.addLayout(form)
 
-        # Nút xóa màn hình thu
-        self.btn_clear_rx = QtWidgets.QPushButton("Xóa Bộ Đệm Ảnh Thu")
-        layout.addWidget(self.btn_clear_rx)
+        # Nút điều khiển CRC & Xóa màn hình thu
+        rx_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_toggle_crc = QtWidgets.QPushButton("🛡️ CRC: BẬT")
+        self.btn_toggle_crc.setCheckable(True)
+        self.btn_toggle_crc.setChecked(True)
+        self.btn_toggle_crc.setStyleSheet("background: #00E676; color: #121218; font-weight: bold; border-radius: 4px; padding: 6px;")
+        
+        self.btn_clear_rx = QtWidgets.QPushButton("Xóa Bộ Đệm Ảnh")
+        self.btn_clear_rx.setStyleSheet("background: #2D3748; color: #E2E8F0; border-radius: 4px; padding: 6px;")
+
+        rx_btn_layout.addWidget(self.btn_toggle_crc)
+        rx_btn_layout.addWidget(self.btn_clear_rx)
+        layout.addLayout(rx_btn_layout)
 
         layout.addStretch()
         return box
@@ -705,6 +715,7 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
 
         # Cột Rx
         self.btn_rx_connect.clicked.connect(lambda: self.toggle_connect("RX"))
+        self.btn_toggle_crc.clicked.connect(self.toggle_rx_crc)
         self.btn_clear_rx.clicked.connect(self.clear_rx_display)
 
         # Kết nối tín hiệu tiểu trình đọc Serial
@@ -889,12 +900,16 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
             self.lbl_ch_ber_val.setText(f"{ber_pct:.1f} %")
             self.bar_ch_ber.setValue(int(ber_pct * 10))
 
-        # 2. Cập nhật giá trị đọc trực tiếp từ biến trở vật lý (GPIO 3 ADC 12-bit)
+        # 2. Cập nhật giá trị đọc trực tiếp từ biến trở vật lý (GPIO 0 ADC1 12-bit)
         pot_raw = None
         if "pot" in d:
             pot_raw = int(d["pot"])
         elif "raw" in d:
             pot_raw = int(d["raw"])
+        elif "A0" in d:
+            pot_raw = int(d["A0"])
+        elif "A1" in d:
+            pot_raw = int(d["A1"])
         elif "A3" in d:
             pot_raw = int(d["A3"])
         elif ber_pct is not None:
@@ -904,7 +919,7 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
             pot_raw = max(0, min(4095, pot_raw))
             volt = (pot_raw / 4095.0) * 3.3
             self.lbl_ch_pot_adc.setText(f"{pot_raw} / 4095  ({volt:.2f} V)")
-            self.lbl_ch_pot_quick.setText(f"Biến Trở: {pot_raw} / 4095  ({volt:.2f} V)")
+            self.lbl_ch_pot_quick.setText(f"Biến Trở (GPIO 0): {pot_raw} / 4095  ({volt:.2f} V)")
 
         # 3. Thông số khung và bit lỗi
         if "frames" in d:
@@ -942,16 +957,9 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         if "ber" in d:
             ber_val = float(d["ber"])
             self.lbl_rx_ber.setText(f"{ber_val:.1f} %")
-            # Nếu bo Kênh chưa cắm trực tiếp vào PC, đồng bộ luôn giá trị biến trở ước lượng sang cột Kênh
+            # Khi bo Kênh chưa cắm trực tiếp vào PC, cập nhật gợi ý thay vì gán đè số liệu giả định
             if not self.ch_thread._is_running:
-                pot_est = int((ber_val / 12.0) * 4095)
-                if pot_est > 4095: pot_est = 4095
-                if pot_est < 0: pot_est = 0
-                volt_est = (pot_est / 4095.0) * 3.3
-                self.lbl_ch_pot_adc.setText(f"{pot_est} / 4095  ({volt_est:.2f} V)")
-                self.lbl_ch_pot_quick.setText(f"Biến Trở (qua Rx): {pot_est} / 4095  ({volt_est:.2f} V)")
-                self.lbl_ch_ber_val.setText(f"{ber_val:.1f} %")
-                self.bar_ch_ber.setValue(int(ber_val * 10))
+                self.lbl_ch_pot_quick.setText("Biến Trở: (Cắm USB bo Kênh để đọc trực tiếp)")
         if "rec_mode" in d:
             modes = {0: "DIRECT", 1: "HAMMING", 2: "CYCLIC"}
             self.lbl_rx_rec_mode.setText(modes.get(d["rec_mode"], "DIRECT"))
@@ -1093,6 +1101,18 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         self.log_table.setRowCount(0)
         self._update_plot()
         show_custom_msg(self, "Thông Báo", "Đã gửi lệnh đặt lại toàn bộ thống kê trên cả 3 nút mạng!", "info")
+
+    def toggle_rx_crc(self):
+        """Bật hoặc Tắt kiểm tra CRC16 trên Máy thu (Rx)."""
+        is_checked = self.btn_toggle_crc.isChecked()
+        if is_checked:
+            self.btn_toggle_crc.setText("🛡️ CRC: BẬT")
+            self.btn_toggle_crc.setStyleSheet("background: #00E676; color: #121218; font-weight: bold; border-radius: 4px; padding: 6px;")
+            self.rx_thread.send_command('{"cmd":"SET_CRC_CHECK","enabled":true}')
+        else:
+            self.btn_toggle_crc.setText("⚠️ CRC: TẮT (Vẽ ảnh tự do)")
+            self.btn_toggle_crc.setStyleSheet("background: #FF5252; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 6px;")
+            self.rx_thread.send_command('{"cmd":"SET_CRC_CHECK","enabled":false}')
 
     def export_csv_logs(self):
         if not self.telemetry_logs:

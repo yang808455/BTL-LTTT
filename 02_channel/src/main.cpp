@@ -32,45 +32,137 @@ static unsigned long g_last_oled_time = 0;
 static unsigned long g_last_adc_time = 0;
 static unsigned long g_last_diag_time = 0;
 
+/* Giám sát công tắc gạt 3 nấc chuyển Baudrate tức thì */
+static uint32_t g_current_baudrate = CHANNEL_BAUDRATE;
+static unsigned long g_last_baud_sw_time = 0;
+
+static uint32_t read_switch_baudrate() {
+    int sw1 = digitalRead(PIN_SW_BAUD_1); // GPIO 2 (kéo lên 1)
+    int sw2 = digitalRead(PIN_SW_BAUD_2); // GPIO 3 (kéo lên 1)
+
+    if (sw1 == 0 && sw2 == 1) {
+        return 9600;    /* Nấc 1: Gạt sang TRÁI (GPIO 2 chạm GND) */
+    } else if (sw1 == 1 && sw2 == 1) {
+        return 38400;   /* Nấc 2: Ở GIỮA (hở mạch cả 2 bên) */
+    } else if (sw1 == 1 && sw2 == 0) {
+        return 115200;  /* Nấc 3: Gạt sang PHẢI (GPIO 3 chạm GND) */
+    }
+    return 115200;      /* Mặc định an toàn */
+}
+
+static void check_and_update_baudrate() {
+    if (millis() - g_last_baud_sw_time < 50) return; // Debounce 50ms
+    g_last_baud_sw_time = millis();
+
+    uint32_t target_baud = read_switch_baudrate();
+    if (target_baud != g_current_baudrate) {
+        g_current_baudrate = target_baud;
+        SerialFromTx.flush();
+        SerialToRx.flush();
+        SerialFromTx.begin(g_current_baudrate, SERIAL_8N1, PIN_RX_FROM_TX, PIN_TX_TO_TX);
+        SerialToRx.begin(g_current_baudrate, SERIAL_8N1, PIN_RX_FROM_RX, PIN_TX_TO_RX);
+        Serial.printf("{\"node\":\"CH\",\"event\":\"BAUD_CHANGE\",\"baud\":%u}\n", g_current_baudrate);
+    }
+}
+
 /* Framebuffer ảnh 64x64 sau khi chịu tác động của nhiễu trên Kênh truyền */
 static uint8_t g_ch_noisy_image_buf[SAMPLE_IMAGE_SIZE_BYTES] = {0};
 
-/* Bộ lọc trung bình 32 mẫu + Vùng trễ chống rung số cho biến trở ADC */
+/* Bộ lọc Median (Trung vị) 15 mẫu + Deadband 160 nấc: Triệt tiêu 100% hiện tượng trôi và rung số */
 static uint16_t g_stable_pot_raw = 0;
 
 static float read_filtered_potentiometer() {
-    uint32_t sum = 0;
-    for (int i = 0; i < 32; i++) {
-        sum += analogRead(PIN_POTENTIOMETER);
-    }
-    uint16_t current_avg = (uint16_t)(sum / 32);
+    const int NUM_SAMPLES = 15;
+    uint16_t samples[NUM_SAMPLES];
 
-    /* Vùng trễ (Deadband): Chỉ cập nhật khi người dùng thực sự xoay núm (> 20 nấc) */
-    if (abs((int)current_avg - (int)g_stable_pot_raw) > 20 || current_avg < 35 || current_avg > 4060) {
-        g_stable_pot_raw = current_avg;
+    /* 1. Đọc 15 mẫu cách nhau 1 chút để bắt trọn chu kỳ nhiễu */
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        samples[i] = analogRead(PIN_POTENTIOMETER);
+        delayMicroseconds(50);
     }
 
-    /* Chốt cận 2 đầu (Deadzone) */
-    if (g_stable_pot_raw < 35) {
-        g_stable_pot_raw = 0;
-    } else if (g_stable_pot_raw > 4060) {
-        g_stable_pot_raw = 4095;
+    /* 2. Sắp xếp nổi bọt (Bubble Sort) để tìm giá trị trung vị (Median) */
+    for (int i = 0; i < NUM_SAMPLES - 1; i++) {
+        for (int j = 0; j < NUM_SAMPLES - i - 1; j++) {
+            if (samples[j] > samples[j + 1]) {
+                uint16_t temp = samples[j];
+                samples[j] = samples[j + 1];
+                samples[j + 1] = temp;
+            }
+        }
     }
 
-    /* Ánh xạ 0..4095 -> BER 0.0% đến 12.0% (0.00 đến 0.12) */
-    float ber = ((float)g_stable_pot_raw / 4095.0f) * 0.12f;
+    /* Mẫu trung vị nằm chính giữa (phần tử thứ 7 trong mảng 15 phần tử) */
+    uint16_t median_val = samples[NUM_SAMPLES / 2];
+
+    /* 3. Vùng trễ chống trôi tiếp xúc (Deadband 160 nấc ~ 4% dải xoay):
+          Nếu độ trôi nhỏ hơn 160 nấc, giữ nguyên giá trị cũ tuyệt đối không đổi */
+    if (g_stable_pot_raw == 0 && median_val < 60) {
+        // Đang ở mức 0
+    } else if (abs((int)median_val - (int)g_stable_pot_raw) > 160 || median_val < 60 || median_val > 4030) {
+        g_stable_pot_raw = median_val;
+    }
+
+    /* 4. Chốt cận 2 đầu */
+    uint16_t final_pot = g_stable_pot_raw;
+    if (final_pot < 60) {
+        final_pot = 0;
+    } else if (final_pot > 4030) {
+        final_pot = 4095;
+    }
+
+    /* 5. Ánh xạ sang BER 0.0% đến 12.0% và làm tròn bước 0.5% (đứng yên tuyệt đối) */
+    float raw_ber = ((float)final_pot / 4095.0f) * 0.12f;
+    const float STEP = 0.005f; /* Bước nhảy 0.5% dứt khoát */
+    float ber = roundf(raw_ber / STEP) * STEP;
+
+    if (ber < 0.0f) ber = 0.0f;
+    if (ber > 0.12f) ber = 0.12f;
+
     return ber;
 }
 
-/* Cập nhật giao diện màn hình OLED 2: CHỈ HIỂN THỊ TÍN HIỆU ẢNH NHIỄU (CĂN GIỮA) */
+/* Cập nhật giao diện màn hình OLED 2: ẢNH NHIỄU BÊN TRÁI (64x64) + THÔNG SỐ BER BÊN PHẢI */
 static void update_oled_display() {
     u8g2.clearBuffer();
 
-    /* Khung viền bao quanh tín hiệu ảnh */
-    u8g2.drawFrame(31, 0, 66, 64);
+    /* 1. NỬA TRÁI (0..63): Ảnh tín hiệu chịu nhiễu 64x64 kèm khung viền */
+    u8g2.drawFrame(0, 0, 64, 64);
+    u8g2.drawBitmap(0, 0, 8, 64, g_ch_noisy_image_buf);
 
-    /* Căn giữa màn hình 128x64: x = 32, y = 0, rộng 64 (8 bytes), cao 64 */
-    u8g2.drawBitmap(32, 0, 8, 64, g_ch_noisy_image_buf);
+    /* Đường kẻ phân cách giữa 2 vùng */
+    u8g2.drawVLine(65, 0, 64);
+
+    /* 2. NỬA PHẢI (67..127): Hiển thị thông số BER và thanh đo */
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(68, 12, "BER (CH):");
+
+    /* Giá trị BER dạng phần trăm (VD: " 4.8%") */
+    char ber_str[16];
+    float ber_percent = g_settings.ber * 100.0f;
+    snprintf(ber_str, sizeof(ber_str), "%.1f%%", ber_percent);
+
+    u8g2.setFont(u8g2_font_helvB10_tr);
+    u8g2.drawStr(70, 29, ber_str);
+
+    /* Thanh đo đồ họa tỷ lệ BER (x: 68, y: 35, rộng: 56, cao: 7) */
+    u8g2.drawFrame(68, 35, 56, 7);
+    int bar_w = (int)((g_settings.ber / 0.12f) * 52.0f);
+    if (bar_w > 52) bar_w = 52;
+    if (bar_w > 0) {
+        u8g2.drawBox(70, 37, bar_w, 3);
+    }
+
+    /* Số bit bị lật trong khung gần nhất */
+    char flip_str[16];
+    snprintf(flip_str, sizeof(flip_str), "Flip:%u", (unsigned)g_last_flipped_bits);
+    u8g2.setFont(u8g2_font_5x7_tf);
+    u8g2.drawStr(68, 52, flip_str);
+
+    /* Chỉ số khung hình */
+    char frame_str[16];
+    snprintf(frame_str, sizeof(frame_str), "Frm:%u", (unsigned)g_total_frames);
+    u8g2.drawStr(68, 62, frame_str);
 
     u8g2.sendBuffer();
 }
@@ -234,17 +326,25 @@ void setup() {
     u8g2.begin();
     u8g2.setContrast(255);
 
+    /* Khởi tạo 2 chân công tắc 3 nấc chuyển Baudrate */
+    pinMode(PIN_SW_BAUD_1, INPUT_PULLUP);
+    pinMode(PIN_SW_BAUD_2, INPUT_PULLUP);
+    g_current_baudrate = read_switch_baudrate();
+
     /* UART0: Kết nối với Máy phát Tx (RX: 20, TX: 21) */
-    SerialFromTx.begin(CHANNEL_BAUDRATE, SERIAL_8N1, PIN_RX_FROM_TX, PIN_TX_TO_TX);
+    SerialFromTx.begin(g_current_baudrate, SERIAL_8N1, PIN_RX_FROM_TX, PIN_TX_TO_TX);
 
     /* UART1: Kết nối với Máy thu Rx (RX: 4, TX: 5) */
-    SerialToRx.begin(CHANNEL_BAUDRATE, SERIAL_8N1, PIN_RX_FROM_RX, PIN_TX_TO_RX);
+    SerialToRx.begin(g_current_baudrate, SERIAL_8N1, PIN_RX_FROM_RX, PIN_TX_TO_RX);
 
     update_oled_display();
     Serial.println("{\"node\":\"CH\",\"status\":\"READY\"}");
 }
 
 void loop() {
+    /* 0. Quét công tắc 3 nấc để đồng bộ Baudrate tức thời */
+    check_and_update_baudrate();
+
     /* 1. Tiếp nhận lệnh điều khiển từ PC qua cổng USB */
     if (Serial.available() > 0) {
         String cmd = Serial.readStringUntil('\n');
@@ -277,14 +377,14 @@ void loop() {
         update_oled_display();
     }
 
-    /* 6. In chẩn đoán giá trị ADC chân biến trở */
+    /* 6. In chẩn đoán giá trị ADC chân biến trở và trạng thái công tắc Baudrate */
     if (millis() - g_last_diag_time >= 1000) {
         g_last_diag_time = millis();
         uint16_t a0 = analogRead(0);
         uint16_t a1 = analogRead(1);
-        uint16_t a2 = analogRead(2);
-        uint16_t a3 = analogRead(3);
-        Serial.printf("{\"node\":\"CH\",\"diag\":\"ADC\",\"A0\":%u,\"A1\":%u,\"A2\":%u,\"A3\":%u,\"ber\":%.4f,\"raw\":%u}\n",
-                      a0, a1, a2, a3, g_settings.ber, g_stable_pot_raw);
+        int sw1 = digitalRead(PIN_SW_BAUD_1);
+        int sw2 = digitalRead(PIN_SW_BAUD_2);
+        Serial.printf("{\"node\":\"CH\",\"diag\":\"STATUS\",\"A0\":%u,\"A1\":%u,\"ber\":%.4f,\"raw\":%u,\"sw1\":%d,\"sw2\":%d,\"baud\":%u}\n",
+                      a0, a1, g_settings.ber, g_stable_pot_raw, sw1, sw2, g_current_baudrate);
     }
 }
