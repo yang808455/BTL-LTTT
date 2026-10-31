@@ -235,30 +235,42 @@ static void process_forward_data() {
                     SerialToRx.write(rx_buf, rx_idx);
                     SerialToRx.flush();
 
-                    /* Tái tạo mảnh ảnh 128 byte tương ứng chịu đúng mức nhiễu BSC này */
+                    /* Tái tạo mảnh ảnh 64 byte tương ứng chịu đúng mức nhiễu BSC này */
                     uint8_t seq = rx_buf[1];
-                    uint8_t img_idx = (rx_buf[2] >> 4) & 0x01;
+                    uint8_t img_idx = rx_buf[2] >> 4;
+                    channel_alg_t chn_alg = (channel_alg_t)rx_buf[3];
                     uint8_t chunk_idx = seq % SAMPLE_IMAGE_NUM_CHUNKS;
 
                     static uint8_t s_channel_last_img_idx = 0xFF;
                     if (img_idx != s_channel_last_img_idx) {
                         s_channel_last_img_idx = img_idx;
-                        const uint8_t *full_src = g_sample_images[img_idx];
-                        memcpy(g_ch_noisy_image_buf, full_src, SAMPLE_IMAGE_SIZE_BYTES);
-                        if (g_settings.enabled && g_settings.ber > 0.0001f) {
-                            size_t f_all = 0;
-                            noise_gen_apply_bsc(g_ch_noisy_image_buf, 0, SAMPLE_IMAGE_SIZE_BYTES, g_settings.ber, &f_all);
-                        }
-                        update_oled_display(); /* Hiển thị ngay ảnh mới kèm nhiễu */
+                        memset(g_ch_noisy_image_buf, 0, SAMPLE_IMAGE_SIZE_BYTES);
+                        update_oled_display(); /* Hiển thị ngay khung trống khi đổi ảnh */
                     }
 
-                    const uint8_t *src_chunk = g_sample_images[img_idx] + chunk_idx * SAMPLE_IMAGE_CHUNK_SIZE;
+                    /* Trích xuất 64 bytes mảnh ảnh chịu nhiễu trực tiếp từ payload sau khi đã gây nhiễu BSC */
                     uint8_t noisy_chunk[SAMPLE_IMAGE_CHUNK_SIZE];
-                    memcpy(noisy_chunk, src_chunk, SAMPLE_IMAGE_CHUNK_SIZE);
+                    const uint8_t *payload = &rx_buf[FRAME_HEADER_LEN];
 
-                    if (g_settings.enabled && g_settings.ber > 0.0001f) {
-                        size_t img_flipped = 0;
-                        noise_gen_apply_bsc(noisy_chunk, 0, SAMPLE_IMAGE_CHUNK_SIZE, g_settings.ber, &img_flipped);
+                    if (chn_alg == CHN_ALG_HAMMING_84 && exp_len >= SAMPLE_IMAGE_CHUNK_SIZE * 2) {
+                        for (size_t i = 0; i < SAMPLE_IMAGE_CHUNK_SIZE; i++) {
+                            uint8_t hi = (payload[i * 2] >> 4) & 0x0F;
+                            uint8_t lo = (payload[i * 2 + 1] >> 4) & 0x0F;
+                            noisy_chunk[i] = (hi << 4) | lo;
+                        }
+                    } else if (chn_alg == CHN_ALG_CYCLIC_74 && exp_len >= SAMPLE_IMAGE_CHUNK_SIZE * 2) {
+                        for (size_t i = 0; i < SAMPLE_IMAGE_CHUNK_SIZE; i++) {
+                            uint8_t hi = (payload[i * 2] >> 3) & 0x0F;
+                            uint8_t lo = (payload[i * 2 + 1] >> 3) & 0x0F;
+                            noisy_chunk[i] = (hi << 4) | lo;
+                        }
+                    } else {
+                        // CHN_ALG_NONE (Direct)
+                        size_t copy_len = (exp_len < SAMPLE_IMAGE_CHUNK_SIZE) ? exp_len : SAMPLE_IMAGE_CHUNK_SIZE;
+                        memcpy(noisy_chunk, payload, copy_len);
+                        if (copy_len < SAMPLE_IMAGE_CHUNK_SIZE) {
+                            memset(&noisy_chunk[copy_len], 0, SAMPLE_IMAGE_CHUNK_SIZE - copy_len);
+                        }
                     }
 
                     memcpy(&g_ch_noisy_image_buf[chunk_idx * SAMPLE_IMAGE_CHUNK_SIZE], noisy_chunk, SAMPLE_IMAGE_CHUNK_SIZE);
