@@ -159,10 +159,10 @@ static void update_oled_display() {
     u8g2.setFont(u8g2_font_5x7_tf);
     u8g2.drawStr(68, 52, flip_str);
 
-    /* Chỉ số khung hình */
-    char frame_str[16];
-    snprintf(frame_str, sizeof(frame_str), "Frm:%u", (unsigned)g_total_frames);
-    u8g2.drawStr(68, 62, frame_str);
+    /* Tốc độ Baudrate hiện tại (đồng bộ công tắc gạt) */
+    char baud_str[16];
+    snprintf(baud_str, sizeof(baud_str), "Baud:%u", (unsigned)g_current_baudrate);
+    u8g2.drawStr(68, 62, baud_str);
 
     u8g2.sendBuffer();
 }
