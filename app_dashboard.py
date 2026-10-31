@@ -11,6 +11,8 @@ import os
 import json
 import time
 import csv
+import glob
+import subprocess
 from datetime import datetime
 from collections import deque
 
@@ -243,6 +245,8 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         self.rx_image_buffer = bytearray(512)
         self.ch_image_buffer = bytearray(512)
         self.current_tx_img_idx = 0
+        self.saved_images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_images")
+        self.current_custom_image_bytes = None
         self.ber_history = deque(maxlen=60)
         self.time_history = deque(maxlen=60)
         self.telemetry_logs = []
@@ -251,8 +255,9 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         self._apply_dark_theme()
         self._wire_signals()
 
-        # Quét cổng nối tiếp khi mở ứng dụng
+        # Quét cổng nối tiếp và nạp danh sách ảnh đã lưu
         self.refresh_com_ports()
+        self.refresh_saved_images_list()
 
     def _init_ui(self):
         central_widget = QtWidgets.QWidget()
@@ -363,13 +368,42 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
 
         self._render_tx_image(0)
 
-        # Nút chuyển ảnh
+        # Nút chuyển ảnh mẫu mặc định
         btn_img_layout = QtWidgets.QHBoxLayout()
         self.btn_img_smile = QtWidgets.QPushButton("Ảnh 1: Mặt Cười")
         self.btn_img_score10 = QtWidgets.QPushButton("Ảnh 2: Điểm 10")
         btn_img_layout.addWidget(self.btn_img_smile)
         btn_img_layout.addWidget(self.btn_img_score10)
         layout.addLayout(btn_img_layout)
+
+        # Khu vực Ảnh Tùy Chọn Đã Vẽ (saved_images/)
+        custom_box = QtWidgets.QGroupBox("Thư Viện Ảnh Đã Vẽ (saved_images/)")
+        custom_box.setStyleSheet("QGroupBox { font-size: 11px; font-weight: bold; border: 1px solid #334155; margin-top: 4px; padding: 6px; border-radius: 4px; }")
+        custom_layout = QtWidgets.QVBoxLayout(custom_box)
+        custom_layout.setSpacing(6)
+
+        c_row1 = QtWidgets.QHBoxLayout()
+        self.combo_saved_images = QtWidgets.QComboBox()
+        self.btn_refresh_images = QtWidgets.QPushButton("🔄")
+        self.btn_refresh_images.setFixedWidth(32)
+        self.btn_refresh_images.setToolTip("Làm mới danh sách ảnh đã vẽ")
+        c_row1.addWidget(QtWidgets.QLabel("Ảnh:"))
+        c_row1.addWidget(self.combo_saved_images, 1)
+        c_row1.addWidget(self.btn_refresh_images)
+        custom_layout.addLayout(c_row1)
+
+        c_row2 = QtWidgets.QHBoxLayout()
+        self.btn_send_custom_img = QtWidgets.QPushButton("🚀 Nạp & Phát Ảnh Này")
+        self.btn_send_custom_img.setStyleSheet("background: #00E5FF; color: black; font-weight: bold; padding: 5px;")
+        self.btn_send_custom_img.setEnabled(False)
+        self.btn_send_custom_img.setToolTip("Cần kết nối cổng COM Máy phát (TX) trước khi nạp")
+        self.btn_open_draw_tool = QtWidgets.QPushButton("🎨 Mở Bảng Vẽ")
+        self.btn_open_draw_tool.setStyleSheet("background: #3B82F6; color: white; padding: 5px;")
+        c_row2.addWidget(self.btn_send_custom_img, 3)
+        c_row2.addWidget(self.btn_open_draw_tool, 2)
+        custom_layout.addLayout(c_row2)
+
+        layout.addWidget(custom_box)
 
         # Bảng thông số phát
         form = QtWidgets.QFormLayout()
@@ -703,6 +737,10 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         self.btn_tx_connect.clicked.connect(lambda: self.toggle_connect("TX"))
         self.btn_img_smile.clicked.connect(lambda: self.set_tx_image(0))
         self.btn_img_score10.clicked.connect(lambda: self.set_tx_image(1))
+        self.btn_refresh_images.clicked.connect(self.refresh_saved_images_list)
+        self.combo_saved_images.currentIndexChanged.connect(self.on_saved_image_selected)
+        self.btn_send_custom_img.clicked.connect(self.send_custom_image_to_tx)
+        self.btn_open_draw_tool.clicked.connect(self.open_draw_tool)
         self.btn_mode_auto.clicked.connect(self.set_tx_auto_adaptive)
         self.btn_mode_direct.clicked.connect(lambda: self.set_tx_mode(0))
         self.btn_mode_hamming.clicked.connect(lambda: self.set_tx_mode(1))
@@ -836,6 +874,13 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
             status_lbl.setStyleSheet("color: #AAAAAA; font-weight: bold; font-size: 12px;")
             btn.setText("Kết Nối")
 
+        if node_type == "TX":
+            self.btn_send_custom_img.setEnabled(is_connected)
+            if is_connected:
+                self.btn_send_custom_img.setToolTip("Nạp ảnh đang chọn vào máy phát và truyền đi")
+            else:
+                self.btn_send_custom_img.setToolTip("Cần kết nối cổng COM Máy phát (TX) trước khi nạp")
+
     @pyqtSlot(str, str)
     def handle_serial_line(self, node_type: str, line: str):
         """Xử lý dòng telemetry JSON từ từng vi điều khiển ESP32-C3."""
@@ -870,8 +915,12 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         self._append_log_table(now_str, node_type, event, data)
 
     def _handle_tx_data(self, d: dict):
-        if "img_idx" in d:
-            self._render_tx_image(d["img_idx"])
+        if d.get("is_custom") or d.get("event") == "CUSTOM_IMAGE_LOADED":
+            if self.current_custom_image_bytes and len(self.current_custom_image_bytes) == 512:
+                self._render_tx_custom_bytes(self.current_custom_image_bytes)
+        elif "img_idx" in d:
+            if d["img_idx"] < 10:
+                self._render_tx_image(d["img_idx"])
         if "chn_alg" in d:
             modes = {0: ("DIRECT", "#00E676"), 1: ("HAMMING (7,4)", "#FFD600"), 2: ("CYCLIC (7,4)", "#FF1744")}
             name, color = modes.get(d["chn_alg"], ("UNKNOWN", "#FFFFFF"))
@@ -978,9 +1027,77 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
     def _render_tx_image(self, idx: int):
         self.current_tx_img_idx = idx
         raw = SAMPLE_IMAGE_SMILE if idx == 0 else SAMPLE_IMAGE_SCORE10
-        qimg = bytes_to_qimage(raw)
+        self._render_tx_custom_bytes(raw)
+
+    def _render_tx_custom_bytes(self, raw_bytes: bytes):
+        qimg = bytes_to_qimage(raw_bytes)
         pix = QtGui.QPixmap.fromImage(qimg).scaled(160, 160, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
         self.lbl_tx_img.setPixmap(pix)
+
+    def refresh_saved_images_list(self):
+        """Quét và nạp danh sách file .bin trong thư mục saved_images."""
+        prev = self.combo_saved_images.currentText()
+        self.combo_saved_images.blockSignals(True)
+        self.combo_saved_images.clear()
+
+        if os.path.exists(self.saved_images_dir):
+            bin_files = sorted(glob.glob(os.path.join(self.saved_images_dir, "*.bin")))
+            for bf in bin_files:
+                name = os.path.splitext(os.path.basename(bf))[0]
+                self.combo_saved_images.addItem(name, bf)
+
+        self.combo_saved_images.blockSignals(False)
+
+        idx = self.combo_saved_images.findText(prev)
+        if idx >= 0:
+            self.combo_saved_images.setCurrentIndex(idx)
+        elif self.combo_saved_images.count() > 0:
+            self.combo_saved_images.setCurrentIndex(0)
+            self.on_saved_image_selected(0)
+
+    def on_saved_image_selected(self, index: int):
+        bin_path = self.combo_saved_images.currentData()
+        if bin_path and os.path.exists(bin_path):
+            try:
+                with open(bin_path, "rb") as f:
+                    data = f.read()
+                if len(data) == 512:
+                    self.current_custom_image_bytes = data
+                    self._render_tx_custom_bytes(data)
+            except Exception as e:
+                print(f"Error reading image: {e}")
+
+    def send_custom_image_to_tx(self):
+        bin_path = self.combo_saved_images.currentData()
+        if not bin_path or not os.path.exists(bin_path):
+            show_custom_msg(self, "Lỗi", "Vui lòng chọn ảnh hợp lệ từ danh sách!", "warning")
+            return
+
+        try:
+            with open(bin_path, "rb") as f:
+                data = f.read()
+            if len(data) != 512:
+                show_custom_msg(self, "Lỗi", f"Kích thước file ảnh không đúng 512 bytes ({len(data)} bytes)!", "warning")
+                return
+
+            hex_str = data.hex().upper()
+            cmd = f'{{"cmd":"LOAD_IMAGE_HEX","hex":"{hex_str}"}}'
+            self.tx_thread.send_command(cmd)
+            self.current_custom_image_bytes = data
+            self._render_tx_custom_bytes(data)
+
+            img_name = os.path.splitext(os.path.basename(bin_path))[0]
+            now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self._append_log_table(now_str, "TX", "LOAD_IMAGE", {"file": img_name, "bytes": len(data)})
+        except Exception as e:
+            show_custom_msg(self, "Lỗi Nạp Ảnh", f"Không thể gửi ảnh tới TX:\n{e}", "warning")
+
+    def open_draw_tool(self):
+        tool_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_ve_anh_64x64.py")
+        if os.path.exists(tool_path):
+            subprocess.Popen([sys.executable, tool_path])
+        else:
+            show_custom_msg(self, "Lỗi", "Không tìm thấy file tool_ve_anh_64x64.py!", "warning")
 
     def _render_rx_image(self):
         qimg = bytes_to_qimage(self.rx_image_buffer)
