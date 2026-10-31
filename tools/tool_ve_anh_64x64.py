@@ -24,7 +24,9 @@ TOTAL_BYTES = (WIDTH * HEIGHT) // 8  # 512 bytes
 SCALE = 8  # Mỗi pixel phóng to thành 8x8 px trên màn hình máy tính -> Canvas 512x512 px
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SAVED_DIR = os.path.join(SCRIPT_DIR, "saved_images")
+parent_saved = os.path.join(os.path.dirname(SCRIPT_DIR), "saved_images")
+local_saved = os.path.join(SCRIPT_DIR, "saved_images")
+SAVED_DIR = parent_saved if os.path.exists(parent_saved) else local_saved
 os.makedirs(SAVED_DIR, exist_ok=True)
 
 class PixelCanvasApp:

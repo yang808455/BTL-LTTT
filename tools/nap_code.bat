@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 set PIO_EXE="%USERPROFILE%\.platformio\penv\Scripts\pio.exe"
-set BASE_DIR=%~dp0
+set BASE_DIR=%~dp0..\
 
 :MENU
 cls

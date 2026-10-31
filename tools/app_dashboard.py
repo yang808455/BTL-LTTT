@@ -245,7 +245,11 @@ class ModernDashboardWindow(QtWidgets.QMainWindow):
         self.rx_image_buffer = bytearray(512)
         self.ch_image_buffer = bytearray(512)
         self.current_tx_img_idx = 0
-        self.saved_images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_images")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_saved = os.path.join(os.path.dirname(script_dir), "saved_images")
+        local_saved = os.path.join(script_dir, "saved_images")
+        self.saved_images_dir = parent_saved if os.path.exists(parent_saved) else local_saved
+        os.makedirs(self.saved_images_dir, exist_ok=True)
         self.current_custom_image_bytes = None
         self.ber_history = deque(maxlen=60)
         self.time_history = deque(maxlen=60)
